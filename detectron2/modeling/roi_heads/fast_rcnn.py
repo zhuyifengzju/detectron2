@@ -45,6 +45,7 @@ Naming convention:
 def fast_rcnn_inference(
     boxes: List[torch.Tensor],
     scores: List[torch.Tensor],
+    box_features: List[torch.Tensor],
     image_shapes: List[Tuple[int, int]],
     score_thresh: float,
     nms_thresh: float,
@@ -77,9 +78,9 @@ def fast_rcnn_inference(
     """
     result_per_image = [
         fast_rcnn_inference_single_image(
-            boxes_per_image, scores_per_image, image_shape, score_thresh, nms_thresh, topk_per_image
+            boxes_per_image, scores_per_image, box_feature_per_image, image_shape, score_thresh, nms_thresh, topk_per_image
         )
-        for scores_per_image, boxes_per_image, image_shape in zip(scores, boxes, image_shapes)
+        for scores_per_image, boxes_per_image, image_shape, box_feature_per_image in zip(scores, boxes, image_shapes, box_features)
     ]
     return [x[0] for x in result_per_image], [x[1] for x in result_per_image]
 
@@ -117,6 +118,7 @@ def _log_classification_stats(pred_logits, gt_classes, prefix="fast_rcnn"):
 def fast_rcnn_inference_single_image(
     boxes,
     scores,
+    box_features,
     image_shape: Tuple[int, int],
     score_thresh: float,
     nms_thresh: float,
@@ -134,15 +136,18 @@ def fast_rcnn_inference_single_image(
         Same as `fast_rcnn_inference`, but for only one image.
     """
     valid_mask = torch.isfinite(boxes).all(dim=1) & torch.isfinite(scores).all(dim=1)
+    # import pdb; pdb.set_trace()
     if not valid_mask.all():
         boxes = boxes[valid_mask]
         scores = scores[valid_mask]
+        box_features = box_features[valid_mask]
 
     scores = scores[:, :-1]
     num_bbox_reg_classes = boxes.shape[1] // 4
     # Convert to Boxes to use the `clip` function ...
     boxes = Boxes(boxes.reshape(-1, 4))
     boxes.clip(image_shape)
+
     boxes = boxes.tensor.view(-1, num_bbox_reg_classes, 4)  # R x C x 4
 
     # 1. Filter results based on detection scores. It can make NMS more efficient
@@ -153,20 +158,24 @@ def fast_rcnn_inference_single_image(
     filter_inds = filter_mask.nonzero()
     if num_bbox_reg_classes == 1:
         boxes = boxes[filter_inds[:, 0], 0]
+        box_features = box_features[filter_inds[:, 0], :]
     else:
         boxes = boxes[filter_mask]
+        box_features = box_features[filter_mask]
+
     scores = scores[filter_mask]
 
     # 2. Apply NMS for each class independently.
     keep = batched_nms(boxes, scores, filter_inds[:, 1], nms_thresh)
     if topk_per_image >= 0:
         keep = keep[:topk_per_image]
-    boxes, scores, filter_inds = boxes[keep], scores[keep], filter_inds[keep]
+    boxes, scores, box_features, filter_inds = boxes[keep], scores[keep], box_features[keep], filter_inds[keep]
 
     result = Instances(image_shape)
     result.pred_boxes = Boxes(boxes)
     result.scores = scores
     result.pred_classes = filter_inds[:, 1]
+    result.box_features = box_features
     return result, filter_inds[:, 0]
 
 
